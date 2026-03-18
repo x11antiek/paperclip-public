@@ -88,39 +88,168 @@ function buildMissionFromQuestionnaire(q1: string, q2: string, q3: string, q4: s
 interface HiringRole {
   id: string;
   name: string;
-  description: string;
+  summary: string;
+  expertise: string;
+  priorities: string;
+  boundaries: string;
+  tools: string;
+  communication: string;
+  collaboration: string;
   enabled: boolean;
   editing: boolean;
 }
 
-let roleIdCounter = 0;
 function nextRoleId(): string {
-  return `role-${++roleIdCounter}`;
+  return crypto.randomUUID();
+}
+
+const EMPTY_ROLE: Omit<HiringRole, "id"> = {
+  name: "", summary: "", expertise: "", priorities: "",
+  boundaries: "", tools: "", communication: "", collaboration: "",
+  enabled: true, editing: true,
+};
+
+function cleanMd(s: string): string {
+  return s
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/^\s*[-*]\s+/, "")
+    .trim();
+}
+
+/**
+ * Map a bullet label (e.g. "Why:", "Responsibilities:") to a structured field.
+ */
+function classifyBullet(label: string): keyof HiringRole | null {
+  const l = label.toLowerCase();
+  if (/^why|^purpose|^overview/.test(l)) return "summary";
+  if (/^responsibilit|^expertise|^duties|^scope|^what they do/.test(l)) return "expertise";
+  if (/^priorit|^focus|^goals|^kpi|^metric/.test(l)) return "priorities";
+  if (/^boundar|^limit|^should not|^don.?t|^avoid|^out of scope/.test(l)) return "boundaries";
+  if (/^tool|^permission|^access|^tech|^stack/.test(l)) return "tools";
+  if (/^communic|^tone|^style|^voice/.test(l)) return "communication";
+  if (/^collaborat|^escalat|^report|^works with|^interact|^coordinat/.test(l)) return "collaboration";
+  if (/^recommend|^profile|^ideal|^skills|^qualif/.test(l)) return "expertise";
+  return null;
 }
 
 /**
  * Parse a markdown hiring plan into structured roles.
- * Looks for bullet points with bold role names: "- **Role Name**: description"
- * Falls back to any bold text in bullet points.
+ * Handles two document formats:
+ *   Format A: "## Role N: Name" with ### sub-sections (Priorities, Boundaries, etc.)
+ *   Format B: "### N. Name" with **Label:** bullets
+ * Fallback: comment-style bullet/table patterns.
  */
 function parseHiringPlan(markdown: string): HiringRole[] {
   const roles: HiringRole[] = [];
-  const lines = markdown.split("\n");
-  for (const line of lines) {
-    // Match "- **Role Name**: description" or "- **Role Name** - description"
-    const match = line.match(
-      /^\s*[-*]\s+\*\*([^*]+)\*\*[:\s-]*(.*)$/
-    );
-    if (match) {
+  const seen = new Set<string>();
+
+  // Split into ## sections (each role is a ## heading)
+  const roleSections = markdown.split(/^##\s+/m).slice(1).filter(Boolean);
+
+  for (const section of roleSections) {
+    const lines = section.split("\n");
+    const titleLine = lines[0]?.trim() ?? "";
+
+    // Extract role name — match "Role N: Name" or just "N. Name" or plain name
+    let name = titleLine
+      .replace(/^role\s*\d*[:.]\s*/i, "")
+      .replace(/^\d+[.)]\s*/, "")
+      .replace(/\*\*/g, "")
+      .trim();
+
+    // Skip non-role sections
+    const skipPatterns = /^(mission|hiring approach|hiring|roles|approach|open|phase|deferred|timeline|budget|summary|next steps|overview|notes|questions|appendix|---)/i;
+    if (skipPatterns.test(name) || name.length < 3) continue;
+    if (seen.has(name.toLowerCase())) continue;
+
+    // Parse content: **Label:** bullets and ### sub-sections
+    const fields: Record<string, string[]> = {};
+    let currentField: string | null = null;
+
+    for (let i = 1; i < lines.length; i++) {
+      const raw = lines[i];
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+
+      // ### sub-section heading (e.g. "### Priorities")
+      const subHeadingMatch = trimmed.match(/^###\s+(.+)/);
+      if (subHeadingMatch) {
+        const label = subHeadingMatch[1].trim();
+        const field = classifyBullet(label);
+        currentField = (field && field !== "id" && field !== "name" && field !== "enabled" && field !== "editing")
+          ? field : "expertise";
+        continue;
+      }
+
+      // **Label:** inline (e.g. "**Why:** text")
+      const boldLabelMatch = trimmed.match(/^\*\*([^*:]+)[*:]*\*\*[:\s]*(.*)/);
+      const bulletLabelMatch = !boldLabelMatch && trimmed.match(/^\s*[-*]\s+\*\*([^*:]+)[*:]*\*\*[:\s]*(.*)/);
+      const labelMatch = boldLabelMatch ?? bulletLabelMatch;
+
+      if (labelMatch) {
+        const label = labelMatch[1]!.trim();
+        const value = cleanMd(labelMatch[2] ?? "");
+        const field = classifyBullet(label);
+        currentField = (field && field !== "id" && field !== "name" && field !== "enabled" && field !== "editing")
+          ? field : "expertise";
+        if (!fields[currentField]) fields[currentField] = [];
+        if (value) fields[currentField].push(value);
+        continue;
+      }
+
+      // Regular content line under current field
+      if (currentField) {
+        const cleaned = cleanMd(trimmed);
+        if (cleaned) {
+          if (!fields[currentField]) fields[currentField] = [];
+          fields[currentField].push(cleaned);
+        }
+      }
+    }
+
+    const join = (arr?: string[]) => (arr ?? []).join("\n");
+
+    seen.add(name.toLowerCase());
+    roles.push({
+      id: nextRoleId(),
+      name,
+      summary: join(fields.summary),
+      expertise: join(fields.expertise),
+      priorities: join(fields.priorities),
+      boundaries: join(fields.boundaries),
+      tools: join(fields.tools),
+      communication: join(fields.communication),
+      collaboration: join(fields.collaboration),
+      enabled: true,
+      editing: false,
+    });
+  }
+
+  // Fallback: simple bullet parsing from comment text
+  if (roles.length === 0) {
+    const lines = markdown.split("\n");
+    for (const line of lines) {
+      const bulletMatch = line.match(
+        /^\s*(?:[-*]|\d+[.)]\s*)\s*\*\*([^*]+)\*\*[:\s—–-]*(.*)$/
+      );
+      if (!bulletMatch) continue;
+      const name = bulletMatch[1].trim();
+      const summary = cleanMd(bulletMatch[2]);
+      if (seen.has(name.toLowerCase())) continue;
+      const skip = /^(phase|month|step|update|note|question|summary|timeline|priority|plan|total|budget|immediate|hire|\d+ immediate)/i;
+      if (skip.test(name) || name.length < 3) continue;
+
+      seen.add(name.toLowerCase());
       roles.push({
-        id: nextRoleId(),
-        name: match[1].trim(),
-        description: match[2].trim(),
-        enabled: true,
-        editing: false,
+        id: nextRoleId(), name, summary,
+        expertise: "", priorities: "", boundaries: "",
+        tools: "", communication: "", collaboration: "",
+        enabled: true, editing: false,
       });
     }
   }
+
   return roles;
 }
 
@@ -132,6 +261,17 @@ Ensure you have a folder agents/ceo and then download this AGENTS.md, and siblin
 
 After that, hire yourself a Founding Engineer agent and then plan the roadmap and tasks for your new company.`;
 
+const ONBOARDING_STORAGE_KEY = "paperclip-onboarding-state";
+
+function loadSavedState(): Record<string, unknown> | null {
+  try {
+    const raw = localStorage.getItem(ONBOARDING_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function OnboardingWizard() {
   const { onboardingOpen, onboardingOptions, closeOnboarding } = useDialog();
   const { selectedCompanyId, companies, setSelectedCompanyId } = useCompany();
@@ -141,31 +281,34 @@ export function OnboardingWizard() {
   const initialStep = onboardingOptions.initialStep ?? 1;
   const existingCompanyId = onboardingOptions.companyId;
 
-  const [step, setStep] = useState<Step>(initialStep);
+  // Restore saved state from localStorage (read once on mount)
+  const saved = useMemo(loadSavedState, []);
+
+  const [step, setStep] = useState<Step>((saved?.step as Step) ?? initialStep);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
 
   // Step 1
-  const [companyName, setCompanyName] = useState("");
-  const [companyGoal, setCompanyGoal] = useState("");
-  const [missionPath, setMissionPath] = useState<"direct" | "questionnaire" | null>(null);
-  const [missionConfirmed, setMissionConfirmed] = useState(false);
+  const [companyName, setCompanyName] = useState((saved?.companyName as string) ?? "");
+  const [companyGoal, setCompanyGoal] = useState((saved?.companyGoal as string) ?? "");
+  const [missionPath, setMissionPath] = useState<"direct" | "questionnaire" | null>((saved?.missionPath as "direct" | "questionnaire" | null) ?? null);
+  const [missionConfirmed, setMissionConfirmed] = useState((saved?.missionConfirmed as boolean) ?? false);
   // Questionnaire answers
-  const [q1, setQ1] = useState(""); // What do you do?
-  const [q2, setQ2] = useState(""); // Who do you serve?
-  const [q3, setQ3] = useState(""); // Biggest bottleneck?
-  const [q4, setQ4] = useState(""); // What would success look like?
+  const [q1, setQ1] = useState((saved?.q1 as string) ?? ""); // What do you do?
+  const [q2, setQ2] = useState((saved?.q2 as string) ?? ""); // Who do you serve?
+  const [q3, setQ3] = useState((saved?.q3 as string) ?? ""); // Biggest bottleneck?
+  const [q4, setQ4] = useState((saved?.q4 as string) ?? ""); // What would success look like?
 
   // Step 2
-  const [agentName, setAgentName] = useState("CEO");
-  const [adapterType, setAdapterType] = useState<AdapterType>("claude_local");
-  const [cwd, setCwd] = useState("");
-  const [model, setModel] = useState("");
-  const [command, setCommand] = useState("");
-  const [args, setArgs] = useState("");
-  const [url, setUrl] = useState("");
+  const [agentName, setAgentName] = useState((saved?.agentName as string) ?? "CEO");
+  const [adapterType, setAdapterType] = useState<AdapterType>((saved?.adapterType as AdapterType) ?? "claude_local");
+  const [cwd, setCwd] = useState((saved?.cwd as string) ?? "");
+  const [model, setModel] = useState((saved?.model as string) ?? "");
+  const [command, setCommand] = useState((saved?.command as string) ?? "");
+  const [args, setArgs] = useState((saved?.args as string) ?? "");
+  const [url, setUrl] = useState((saved?.url as string) ?? "");
   const [adapterEnvResult, setAdapterEnvResult] =
     useState<AdapterEnvironmentTestResult | null>(null);
   const [adapterEnvError, setAdapterEnvError] = useState<string | null>(null);
@@ -191,30 +334,33 @@ export function OnboardingWizard() {
   }, []);
 
   // Planning task + hiring plan
-  const [planningTaskId, setPlanningTaskId] = useState<string | null>(null);
-  const [planContent, setPlanContent] = useState<string | null>(null);
-  const [hiringRoles, setHiringRoles] = useState<HiringRole[]>([]);
+  const [planningTaskId, setPlanningTaskId] = useState<string | null>((saved?.planningTaskId as string) ?? null);
+  const [planContent, setPlanContent] = useState<string | null>((saved?.planContent as string) ?? null);
+  const [hiringRoles, setHiringRoles] = useState<HiringRole[]>((saved?.hiringRoles as HiringRole[]) ?? []);
   const [showRawPlan, setShowRawPlan] = useState(false);
 
   // Created entity IDs — pre-populate from existing company when skipping step 1
   const [createdCompanyId, setCreatedCompanyId] = useState<string | null>(
-    existingCompanyId ?? null
+    existingCompanyId ?? (saved?.createdCompanyId as string) ?? null
   );
   const [createdCompanyPrefix, setCreatedCompanyPrefix] = useState<
     string | null
-  >(null);
-  const [createdAgentId, setCreatedAgentId] = useState<string | null>(null);
+  >((saved?.createdCompanyPrefix as string) ?? null);
+  const [createdAgentId, setCreatedAgentId] = useState<string | null>((saved?.createdAgentId as string) ?? null);
   const [createdIssueRef, setCreatedIssueRef] = useState<string | null>(null);
 
-  // Sync step and company when onboarding opens with options.
-  // Keep this independent from company-list refreshes so Step 1 completion
-  // doesn't get reset after creating a company.
+  // Sync step and company when onboarding opens with explicit options.
+  // Only override saved state when onboardingOptions explicitly provides values.
   useEffect(() => {
     if (!onboardingOpen) return;
-    const cId = onboardingOptions.companyId ?? null;
-    setStep(onboardingOptions.initialStep ?? 1);
-    setCreatedCompanyId(cId);
-    setCreatedCompanyPrefix(null);
+    // If explicit options are provided, they take precedence over saved state
+    if (onboardingOptions.initialStep) {
+      setStep(onboardingOptions.initialStep);
+    }
+    if (onboardingOptions.companyId) {
+      setCreatedCompanyId(onboardingOptions.companyId);
+      setCreatedCompanyPrefix(null);
+    }
   }, [
     onboardingOpen,
     onboardingOptions.companyId,
@@ -227,6 +373,23 @@ export function OnboardingWizard() {
     const company = companies.find((c) => c.id === createdCompanyId);
     if (company) setCreatedCompanyPrefix(company.issuePrefix);
   }, [onboardingOpen, createdCompanyId, createdCompanyPrefix, companies]);
+
+  // Persist wizard state to localStorage on every change
+  useEffect(() => {
+    if (!onboardingOpen) return;
+    const state = {
+      step, companyName, companyGoal, missionPath, missionConfirmed,
+      q1, q2, q3, q4, agentName, adapterType, cwd, model, command, args, url,
+      createdCompanyId, createdCompanyPrefix, createdAgentId,
+      planningTaskId, planContent, hiringRoles,
+    };
+    localStorage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(state));
+  }, [
+    onboardingOpen, step, companyName, companyGoal, missionPath, missionConfirmed,
+    q1, q2, q3, q4, agentName, adapterType, cwd, model, command, args, url,
+    createdCompanyId, createdCompanyPrefix, createdAgentId,
+    planningTaskId, planContent, hiringRoles,
+  ]);
 
   // Resize textarea when step 3 is shown or description changes
   useEffect(() => {
@@ -316,6 +479,7 @@ export function OnboardingWizard() {
   }, [filteredModels, adapterType]);
 
   function reset() {
+    localStorage.removeItem(ONBOARDING_STORAGE_KEY);
     setStep(1);
     setLoading(false);
     setError(null);
@@ -603,11 +767,18 @@ export function OnboardingWizard() {
         (r) => r.enabled && r.name.trim()
       );
       for (const role of approvedRoles) {
+        const roleSpec = [
+          role.summary && `**Summary:** ${role.summary}`,
+          role.expertise && `**Expertise & Responsibilities:**\n${role.expertise}`,
+          role.priorities && `**Priorities:**\n${role.priorities}`,
+          role.boundaries && `**Boundaries:**\n${role.boundaries}`,
+          role.tools && `**Tools & Permissions:**\n${role.tools}`,
+          role.communication && `**Communication:**\n${role.communication}`,
+          role.collaboration && `**Collaboration:**\n${role.collaboration}`,
+        ].filter(Boolean).join("\n\n");
         await issuesApi.create(createdCompanyId, {
           title: `Hire: ${role.name}`,
-          description: role.description
-            ? `Hire a ${role.name} for the company.\n\n${role.description}`
-            : `Hire a ${role.name} for the company.`,
+          description: `Hire a ${role.name} for the company.\n\n${roleSpec}`,
           assigneeAgentId: createdAgentId,
           status: "todo"
         });
@@ -1430,8 +1601,26 @@ export function OnboardingWizard() {
                   {planningTaskId ? (
                     <OnboardingChat
                       taskId={planningTaskId}
+                      agentId={createdAgentId!}
                       agentName={agentName}
                       onPlanDetected={(md) => setPlanContent(md)}
+                      onReviewPlan={async () => {
+                        // Always fetch the latest plan document for the richest content
+                        try {
+                          const doc = await issuesApi.getDocument(planningTaskId!, "plan");
+                          if (doc.body) {
+                            setPlanContent(doc.body);
+                            setHiringRoles(parseHiringPlan(doc.body));
+                          } else if (planContent) {
+                            setHiringRoles(parseHiringPlan(planContent));
+                          }
+                        } catch {
+                          if (planContent) {
+                            setHiringRoles(parseHiringPlan(planContent));
+                          }
+                        }
+                        setStep(5);
+                      }}
                     />
                   ) : (
                     <div className="rounded-md border border-border p-4 min-h-[200px] flex items-center justify-center">
@@ -1468,15 +1657,7 @@ export function OnboardingWizard() {
                         variant="outline"
                         size="sm"
                         onClick={() =>
-                          setHiringRoles([
-                            {
-                              id: nextRoleId(),
-                              name: "",
-                              description: "",
-                              enabled: true,
-                              editing: true,
-                            },
-                          ])
+                          setHiringRoles([{ ...EMPTY_ROLE, id: nextRoleId() }])
                         }
                       >
                         <Plus className="h-3.5 w-3.5 mr-1" />
@@ -1484,120 +1665,22 @@ export function OnboardingWizard() {
                       </Button>
                     </div>
                   ) : (
-                    <div className="space-y-2">
+                    <div className="space-y-3">
                       {hiringRoles.map((role) => (
-                        <div
+                        <RoleCard
                           key={role.id}
-                          className={cn(
-                            "rounded-md border px-3 py-2.5 transition-colors",
-                            role.enabled
-                              ? "border-border bg-background"
-                              : "border-border/50 bg-muted/30 opacity-60"
-                          )}
-                        >
-                          {role.editing ? (
-                            <div className="space-y-2">
-                              <input
-                                className="w-full rounded border border-border bg-transparent px-2 py-1 text-sm font-medium outline-none focus:ring-1 focus:ring-ring"
-                                placeholder="Role name"
-                                value={role.name}
-                                onChange={(e) =>
-                                  setHiringRoles((prev) =>
-                                    prev.map((r) =>
-                                      r.id === role.id
-                                        ? { ...r, name: e.target.value }
-                                        : r
-                                    )
-                                  )
-                                }
-                                autoFocus
-                              />
-                              <textarea
-                                className="w-full rounded border border-border bg-transparent px-2 py-1 text-sm outline-none focus:ring-1 focus:ring-ring resize-none min-h-[40px]"
-                                placeholder="Role description"
-                                value={role.description}
-                                onChange={(e) =>
-                                  setHiringRoles((prev) =>
-                                    prev.map((r) =>
-                                      r.id === role.id
-                                        ? { ...r, description: e.target.value }
-                                        : r
-                                    )
-                                  )
-                                }
-                              />
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() =>
-                                  setHiringRoles((prev) =>
-                                    prev.map((r) =>
-                                      r.id === role.id
-                                        ? { ...r, editing: false }
-                                        : r
-                                    )
-                                  )
-                                }
-                              >
-                                <Check className="h-3 w-3 mr-1" />
-                                Done
-                              </Button>
-                            </div>
-                          ) : (
-                            <div className="flex items-start gap-2.5">
-                              <input
-                                type="checkbox"
-                                checked={role.enabled}
-                                onChange={(e) =>
-                                  setHiringRoles((prev) =>
-                                    prev.map((r) =>
-                                      r.id === role.id
-                                        ? { ...r, enabled: e.target.checked }
-                                        : r
-                                    )
-                                  )
-                                }
-                                className="mt-1 shrink-0"
-                              />
-                              <div className="flex-1 min-w-0">
-                                <p className="text-sm font-medium">
-                                  {role.name || "Untitled role"}
-                                </p>
-                                {role.description && (
-                                  <p className="text-xs text-muted-foreground mt-0.5">
-                                    {role.description}
-                                  </p>
-                                )}
-                              </div>
-                              <div className="flex items-center gap-1 shrink-0">
-                                <button
-                                  className="p-1 text-muted-foreground hover:text-foreground transition-colors"
-                                  onClick={() =>
-                                    setHiringRoles((prev) =>
-                                      prev.map((r) =>
-                                        r.id === role.id
-                                          ? { ...r, editing: true }
-                                          : r
-                                      )
-                                    )
-                                  }
-                                >
-                                  <Pencil className="h-3 w-3" />
-                                </button>
-                                <button
-                                  className="p-1 text-muted-foreground hover:text-destructive transition-colors"
-                                  onClick={() =>
-                                    setHiringRoles((prev) =>
-                                      prev.filter((r) => r.id !== role.id)
-                                    )
-                                  }
-                                >
-                                  <Trash2 className="h-3 w-3" />
-                                </button>
-                              </div>
-                            </div>
-                          )}
-                        </div>
+                          role={role}
+                          onChange={(updated) =>
+                            setHiringRoles((prev) =>
+                              prev.map((r) => (r.id === role.id ? updated : r))
+                            )
+                          }
+                          onDelete={() =>
+                            setHiringRoles((prev) =>
+                              prev.filter((r) => r.id !== role.id)
+                            )
+                          }
+                        />
                       ))}
                     </div>
                   )}
@@ -1609,13 +1692,7 @@ export function OnboardingWizard() {
                     onClick={() =>
                       setHiringRoles((prev) => [
                         ...prev,
-                        {
-                          id: nextRoleId(),
-                          name: "",
-                          description: "",
-                          enabled: true,
-                          editing: true,
-                        },
+                        { ...EMPTY_ROLE, id: nextRoleId() },
                       ])
                     }
                   >
@@ -1674,31 +1751,7 @@ export function OnboardingWizard() {
                       </p>
                     </div>
                   </div>
-                  <div className="border border-border divide-y divide-border">
-                    <div className="flex items-center gap-3 px-3 py-2.5">
-                      <Building2 className="h-4 w-4 text-muted-foreground shrink-0" />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium truncate">
-                          {companyName}
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          {companyGoal}
-                        </p>
-                      </div>
-                      <Check className="h-4 w-4 text-green-500 shrink-0" />
-                    </div>
-                    <div className="flex items-center gap-3 px-3 py-2.5">
-                      <Bot className="h-4 w-4 text-muted-foreground shrink-0" />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium truncate">
-                          {agentName}
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          CEO · {getUIAdapter(adapterType).label}
-                        </p>
-                      </div>
-                      <Check className="h-4 w-4 text-green-500 shrink-0" />
-                    </div>
+                  <div className="border border-border divide-y divide-border rounded-md">
                     {hiringRoles
                       .filter((r) => r.enabled && r.name.trim())
                       .map((role) => (
@@ -1712,7 +1765,7 @@ export function OnboardingWizard() {
                               {role.name}
                             </p>
                             <p className="text-xs text-muted-foreground truncate">
-                              {role.description || "New hire"}
+                              {role.summary || "New hire"}
                             </p>
                           </div>
                           <span className="text-[10px] text-amber-500 font-medium">
@@ -1786,34 +1839,14 @@ export function OnboardingWizard() {
                       {loading ? "Bringing to life..." : "Give it a heartbeat"}
                     </Button>
                   )}
-                  {step === 4 && (
-                    <>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => {
-                          if (planContent) {
-                            setHiringRoles(parseHiringPlan(planContent));
-                          }
-                          setStep(5);
-                        }}
-                      >
-                        Skip chat
-                      </Button>
-                      <Button
-                        size="sm"
-                        disabled={loading}
-                        onClick={() => {
-                          if (planContent) {
-                            setHiringRoles(parseHiringPlan(planContent));
-                          }
-                          setStep(5);
-                        }}
-                      >
-                        <ArrowRight className="h-3.5 w-3.5 mr-1" />
-                        Next
-                      </Button>
-                    </>
+                  {step === 4 && !planContent && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setStep(5)}
+                    >
+                      Skip chat
+                    </Button>
                   )}
                   {step === 5 && (
                     <Button
@@ -1852,6 +1885,124 @@ export function OnboardingWizard() {
         </div>
       </DialogPortal>
     </Dialog>
+  );
+}
+
+const ROLE_FIELDS: Array<{ key: keyof HiringRole; label: string; placeholder: string }> = [
+  { key: "summary", label: "Summary", placeholder: "One-line description of this role" },
+  { key: "expertise", label: "Expertise & Responsibilities", placeholder: "What this agent does, its skills, and detailed responsibilities" },
+  { key: "priorities", label: "Priorities", placeholder: "What this role focuses on first, in order of importance" },
+  { key: "boundaries", label: "Boundaries", placeholder: "What this role should NOT do, out-of-scope areas" },
+  { key: "tools", label: "Tools & Permissions", placeholder: "What tools, systems, or access this role needs" },
+  { key: "communication", label: "Communication", placeholder: "Tone, style, and interaction guidelines" },
+  { key: "collaboration", label: "Collaboration & Escalation", placeholder: "Who this role works with, escalation paths" },
+];
+
+function RoleCard({
+  role,
+  onChange,
+  onDelete,
+}: {
+  role: HiringRole;
+  onChange: (updated: HiringRole) => void;
+  onDelete: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const update = (field: keyof HiringRole, value: string) =>
+    onChange({ ...role, [field]: value });
+
+  if (role.editing) {
+    return (
+      <div
+        className={cn(
+          "rounded-md border px-3 py-3 transition-colors space-y-3",
+          role.enabled ? "border-border bg-background" : "border-border/50 bg-muted/30 opacity-60"
+        )}
+      >
+        <input
+          className="w-full rounded border border-border bg-transparent px-2 py-1.5 text-sm font-medium outline-none focus:ring-1 focus:ring-ring"
+          placeholder="Role name"
+          value={role.name}
+          onChange={(e) => update("name", e.target.value)}
+          autoFocus
+        />
+        {ROLE_FIELDS.map(({ key, label, placeholder }) => (
+          <div key={key}>
+            <label className="text-[11px] text-muted-foreground mb-0.5 block font-medium">
+              {label}
+            </label>
+            <textarea
+              className="w-full rounded border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:ring-1 focus:ring-ring resize-y min-h-[60px] max-h-[200px]"
+              placeholder={placeholder}
+              value={(role[key] as string) || ""}
+              onChange={(e) => update(key, e.target.value)}
+            />
+          </div>
+        ))}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => onChange({ ...role, editing: false })}
+        >
+          <Check className="h-3 w-3 mr-1" />
+          Done
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={cn(
+        "rounded-md border px-3 py-2.5 transition-colors",
+        role.enabled ? "border-border bg-background" : "border-border/50 bg-muted/30 opacity-60"
+      )}
+    >
+      <div className="flex items-start gap-2.5">
+        <input
+          type="checkbox"
+          checked={role.enabled}
+          onChange={(e) => onChange({ ...role, enabled: e.target.checked })}
+          className="mt-1 shrink-0"
+        />
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-medium">{role.name || "Untitled role"}</p>
+          {role.summary && (
+            <p className="text-xs text-muted-foreground mt-0.5">{role.summary}</p>
+          )}
+          {expanded && (
+            <div className="mt-2 space-y-1.5">
+              {ROLE_FIELDS.filter(({ key }) => key !== "summary" && (role[key] as string)?.trim()).map(({ key, label }) => (
+                <div key={key}>
+                  <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">{label}</p>
+                  <p className="text-xs text-muted-foreground whitespace-pre-line">{role[key] as string}</p>
+                </div>
+              ))}
+            </div>
+          )}
+          <button
+            className="text-[10px] text-muted-foreground hover:text-foreground transition-colors mt-1"
+            onClick={() => setExpanded(!expanded)}
+          >
+            {expanded ? "Show less" : "Show more"}
+          </button>
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            className="p-1 text-muted-foreground hover:text-foreground transition-colors"
+            onClick={() => onChange({ ...role, editing: true })}
+          >
+            <Pencil className="h-3 w-3" />
+          </button>
+          <button
+            className="p-1 text-muted-foreground hover:text-destructive transition-colors"
+            onClick={onDelete}
+          >
+            <Trash2 className="h-3 w-3" />
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
